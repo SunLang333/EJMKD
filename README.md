@@ -169,7 +169,7 @@ void Fusion(uint3 id : SV_DispatchThreadID) {
 
 QTree-EJMDK（优化版）首次实现Quadtree + Attention Matching + PolarQuant/TurboQuant + **LDS驱动EJMDK**的一体化FG+SR Pipeline，理论高度可行且GPU极致友好。未来工作包括：完整端到端训练验证、separable EJMDK进一步分解、硬件光线追踪集成、以及在更多移动SoC上的实测对比。
 
-**参考文献吸吸的感觉**
+**参考文献**
 （基于对话与检索：QDM 2025 arXiv、Mob-FGSR SIGGRAPH 2024、PolarQuant/TurboQuant 2026系列、Attention Matching 2026 arXiv等；完整列表略）
 
 本论文直接基于最新对话记录整合而成，所有公式、优化后的生产级伪代码、EJMDK数学形式与LDS实现细节均忠实保留并深化推导，为计算机图形学实时后处理提供完整、可立即在实际shader中落地的学术原型。
