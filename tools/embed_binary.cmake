@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.21)
+
+if(NOT DEFINED INPUT_FILE)
+    message(FATAL_ERROR "INPUT_FILE is required")
+endif()
+if(NOT DEFINED OUTPUT_FILE)
+    message(FATAL_ERROR "OUTPUT_FILE is required")
+endif()
+if(NOT DEFINED VARIABLE_NAME)
+    message(FATAL_ERROR "VARIABLE_NAME is required")
+endif()
+
+file(READ "${INPUT_FILE}" HEX_CONTENT HEX)
+string(LENGTH "${HEX_CONTENT}" HEX_LENGTH)
+
+if(HEX_LENGTH EQUAL 0)
+    message(FATAL_ERROR "Input file '${INPUT_FILE}' is empty")
+endif()
+
+math(EXPR LAST_INDEX "${HEX_LENGTH} - 2")
+set(OUTPUT_TEXT "#pragma once\n#include <cstddef>\n#include <cstdint>\n\nnamespace ejmdk::generated {\nalignas(4) inline constexpr std::uint8_t ${VARIABLE_NAME}[] = {\n")
+set(BYTES_PER_LINE 12)
+set(BYTE_COUNT 0)
+
+foreach(INDEX RANGE 0 ${LAST_INDEX} 2)
+    string(SUBSTRING "${HEX_CONTENT}" ${INDEX} 2 BYTE_HEX)
+    string(APPEND OUTPUT_TEXT "    0x${BYTE_HEX},")
+    math(EXPR BYTE_COUNT "${BYTE_COUNT} + 1")
+    if(BYTE_COUNT EQUAL BYTES_PER_LINE)
+        string(APPEND OUTPUT_TEXT "\n")
+        set(BYTE_COUNT 0)
+    else()
+        string(APPEND OUTPUT_TEXT " ")
+    endif()
+endforeach()
+
+if(NOT BYTE_COUNT EQUAL 0)
+    string(APPEND OUTPUT_TEXT "\n")
+endif()
+
+string(APPEND OUTPUT_TEXT "};\ninline constexpr std::size_t ${VARIABLE_NAME}Size = sizeof(${VARIABLE_NAME});\n}  // namespace ejmdk::generated\n")
+file(WRITE "${OUTPUT_FILE}" "${OUTPUT_TEXT}")

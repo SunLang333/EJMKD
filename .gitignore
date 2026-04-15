@@ -1,1 +1,5 @@
 sample-5.mp4
+build/
+.vs/
+*.spv
+*_ejmdk_*.mp4

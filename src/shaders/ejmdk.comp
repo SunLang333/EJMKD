@@ -1,0 +1,154 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D prevFrame;
+layout(binding = 1) uniform sampler2D currFrame;
+layout(binding = 2) uniform sampler2D nodeMap;
+layout(binding = 3, rgba8) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform PushConstants {
+    ivec2 srcSize;
+    ivec2 dstSize;
+    float scale;
+    float time;
+    int hasPrev;
+    float sharpen;
+} pc;
+
+float luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec2 clampSourcePosition(vec2 position) {
+    return clamp(position, vec2(0.0), vec2(pc.srcSize) - vec2(1.001));
+}
+
+vec4 sampleFrame(sampler2D frameSampler, vec2 pixelPosition) {
+    vec2 uv = (clampSourcePosition(pixelPosition) + vec2(0.5)) / vec2(pc.srcSize);
+    return texture(frameSampler, uv);
+}
+
+vec2 estimateMotion(vec2 sourcePosition, float searchRadius, float leafRefinement) {
+    if (pc.hasPrev == 0) {
+        return vec2(0.0);
+    }
+
+    vec3 currCenter = sampleFrame(currFrame, sourcePosition).rgb;
+    vec3 currDx = sampleFrame(currFrame, sourcePosition + vec2(1.0, 0.0)).rgb -
+                  sampleFrame(currFrame, sourcePosition - vec2(1.0, 0.0)).rgb;
+    vec3 currDy = sampleFrame(currFrame, sourcePosition + vec2(0.0, 1.0)).rgb -
+                  sampleFrame(currFrame, sourcePosition - vec2(0.0, 1.0)).rgb;
+
+    float bestScore = 1e20;
+    vec2 bestOffset = vec2(0.0);
+    int radius = clamp(int(round(searchRadius)), 1, 4);
+
+    for (int oy = -4; oy <= 4; ++oy) {
+        if (abs(oy) > radius) {
+            continue;
+        }
+        for (int ox = -4; ox <= 4; ++ox) {
+            if (abs(ox) > radius) {
+                continue;
+            }
+
+            vec2 offset = vec2(ox, oy);
+            vec3 prevCenter = sampleFrame(prevFrame, sourcePosition + offset).rgb;
+            vec3 prevDx = sampleFrame(prevFrame, sourcePosition + offset + vec2(1.0, 0.0)).rgb -
+                          sampleFrame(prevFrame, sourcePosition + offset - vec2(1.0, 0.0)).rgb;
+            vec3 prevDy = sampleFrame(prevFrame, sourcePosition + offset + vec2(0.0, 1.0)).rgb -
+                          sampleFrame(prevFrame, sourcePosition + offset - vec2(0.0, 1.0)).rgb;
+
+            float score = dot(abs(prevCenter - currCenter), vec3(0.35, 0.50, 0.15));
+            score += 0.35 * length(prevDx - currDx);
+            score += 0.35 * length(prevDy - currDy);
+            score += dot(offset, offset) * mix(0.035, 0.0125, clamp(leafRefinement, 0.0, 1.0));
+
+            if (score < bestScore) {
+                bestScore = score;
+                bestOffset = offset;
+            }
+        }
+    }
+
+    return bestOffset;
+}
+
+float kernelWeight(ivec2 offset, float detailNorm, vec2 motion) {
+    vec2 sampleOffset = vec2(offset);
+    float sigma = mix(1.85, 0.85, clamp(detailNorm, 0.0, 1.0));
+    float gaussian = exp(-dot(sampleOffset, sampleOffset) / (2.0 * sigma * sigma));
+
+    float anisotropy = clamp(length(motion) * 0.18, 0.0, 0.60);
+    vec2 motionDirection = length(motion) > 0.001 ? normalize(motion) : vec2(1.0, 0.0);
+    float directional = 1.0 + anisotropy * abs(dot(normalize(sampleOffset + vec2(0.001)), motionDirection));
+    return gaussian * directional;
+}
+
+vec3 detailEnhance(vec2 currentPosition, float amount) {
+    vec3 center = sampleFrame(currFrame, currentPosition).rgb;
+    vec3 blur = (
+        sampleFrame(currFrame, currentPosition).rgb * 4.0 +
+        sampleFrame(currFrame, currentPosition + vec2(1.0, 0.0)).rgb +
+        sampleFrame(currFrame, currentPosition - vec2(1.0, 0.0)).rgb +
+        sampleFrame(currFrame, currentPosition + vec2(0.0, 1.0)).rgb +
+        sampleFrame(currFrame, currentPosition - vec2(0.0, 1.0)).rgb
+    ) / 8.0;
+    return center + (center - blur) * amount;
+}
+
+void main() {
+    ivec2 dstCoord = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(dstCoord, pc.dstSize))) {
+        return;
+    }
+
+    vec2 sourcePosition = (vec2(dstCoord) + vec2(0.5)) / pc.scale - vec2(0.5);
+    vec2 nodeUv = (clampSourcePosition(sourcePosition) + vec2(0.5)) / vec2(pc.srcSize);
+    vec4 node = texture(nodeMap, nodeUv);
+
+    float detailStrength = clamp(node.x, 0.0, 1.0);
+    float temporalConfidence = clamp(node.y, 0.0, 1.0);
+    float searchRadius = mix(1.0, 4.0, clamp(node.z, 0.0, 1.0));
+    float leafRefinement = clamp(node.w, 0.0, 1.0);
+
+    vec2 motion = estimateMotion(sourcePosition, searchRadius, leafRefinement);
+    float time = pc.hasPrev == 0 ? 1.0 : clamp(pc.time, 0.0, 1.0);
+
+    vec2 prevPosition = sourcePosition + motion * (1.0 - time);
+    vec2 currPosition = sourcePosition - motion * time;
+
+    float prevWeight = (1.0 - time) * temporalConfidence;
+    float currWeight = time + (1.0 - temporalConfidence) * 0.25;
+    float totalWeight = max(prevWeight + currWeight, 1e-4);
+    prevWeight /= totalWeight;
+    currWeight /= totalWeight;
+
+    vec3 accumulatedColor = vec3(0.0);
+    float accumulatedWeight = 0.0;
+    float kernelControl = mix(detailStrength, leafRefinement, 0.35);
+
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            ivec2 offset = ivec2(x, y);
+            float weight = kernelWeight(offset, kernelControl, motion);
+            vec3 currSample = sampleFrame(currFrame, currPosition + vec2(offset)).rgb;
+            vec3 fusedSample = currSample;
+            if (pc.hasPrev != 0) {
+                vec3 prevSample = sampleFrame(prevFrame, prevPosition + vec2(offset)).rgb;
+                fusedSample = prevSample * prevWeight + currSample * currWeight;
+            }
+            accumulatedColor += fusedSample * weight;
+            accumulatedWeight += weight;
+        }
+    }
+
+    vec3 color = accumulatedColor / max(accumulatedWeight, 1e-5);
+    vec3 detail = detailEnhance(currPosition, mix(0.10, 0.42, detailStrength) * pc.sharpen);
+    float detailMix = mix(0.25, 0.65, detailStrength) * mix(0.55, 0.95, leafRefinement);
+    color = mix(color, detail, detailMix);
+    color = clamp(color, vec3(0.0), vec3(1.0));
+
+    imageStore(outputImage, dstCoord, vec4(color, 1.0));
+}
